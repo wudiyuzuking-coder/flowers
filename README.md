@@ -116,7 +116,7 @@ python ms3_val.py
 | 角色 | 主要职责 |
 |---|---|
 | 1. 模型改进与实验设计负责人 | Baseline 诊断、技术路线、迁移学习/Fine-tuning、消融设计、核心分析、模型代码 review |
-| 2. GPU 训练与性能评测负责人 | RTX 5070 Ti 环境、批量训练、checkpoint、正式测试、重复实验 |
+| 2. GPU 训练与性能评测负责人 | RTX 3090  环境、批量训练、checkpoint、正式测试、重复实验 |
 | 3. 数据处理与训练优化负责人 | 预处理、增强、Dropout/Weight Decay、Scheduler、Early Stopping、类别不平衡处理 |
 | 4. 模型评估与错误分析负责人 | 混淆矩阵、Precision/Recall/F1、曲线、worst-class recall、错例可视化 |
 | 5. 实验工程与结果复现负责人 | 配置、seed、超参数、日志、模型版本、`metrics.csv`、复现和材料整理 |
