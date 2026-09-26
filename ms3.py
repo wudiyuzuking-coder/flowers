@@ -33,7 +33,7 @@ np.random.seed(seed)
 mindspore.set_seed(seed)
 
 cfg = edict({
-    'data_path': r'E:\CodeFile\pythonProject\pythonProject\flowers\flower_photos',
+    'data_path': './flower_photos',
     'data_size':3670,
     'image_width': 100,  # 图片宽度
     'image_height': 100,  # 图片高度
