@@ -1,0 +1,54 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Raw/local datasets (keep split manifests and documentation elsewhere)
+flower_photos/
+data/raw/
+datasets/
+
+# Model weights and training products
+*.pt
+*.pth
+*.ckpt
+*.onnx
+checkpoints/
+restrain_output*/
+wandb/
+runs/
+logs/
+*.log
+tensorboard/
+
+# Large/intermediate result artifacts. Curated confusion matrices, curves and
+# error-case figures are intentionally trackable as experimental evidence.
+results/logs/
+results/tmp/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp

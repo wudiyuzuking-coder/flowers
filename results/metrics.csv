@@ -1,0 +1,1 @@
+experiment_id,model,augmentation,weight_decay,scheduler,fine_tune,class_weight,seed,best_epoch,train_acc,val_acc,test_acc,precision,recall,f1,worst_class_recall,train_test_gap,checkpoint,notes
