@@ -27,7 +27,7 @@
 - 清单文件路径和 SHA-256（或等价校验值）；
 - 是否存在重复、损坏或泄漏样本。
 
-当前源码只有 80% train / 20% test，且未建立独立 validation 集。这个状态不满足正式实验规范，应在后续专项代码变更中修正，但不得在不同实验中临时重新随机切分。
+当前代码统一读取 `splits/train.txt`、`splits/val.txt` 和 `splits/test.txt`，使用 seed 42 按类别分层生成约 70%/10%/20% 的固定划分。`splits/split_info.json` 保存各类别与各 split 数量以及 manifest SHA-256。所有正式实验必须复用这组文件；重新生成只能通过显式 `--force`，且一旦重生成，E0～后续对比实验必须全部重跑。
 
 ## 4. 每个实验必须记录的字段
 
@@ -80,6 +80,10 @@
 7. 生成混淆矩阵、训练/验证曲线、分类报告和错误案例。
 8. 更新 `experiments/<id>_<slug>.md` 与 `results/metrics.csv`。
 9. 提交 PR，由对应负责人检查变量隔离、指标口径和复现信息。
+
+公共评估模块对完整 test manifest 仅遍历一次，统一采用固定类别顺序 `daisy`、`dandelion`、`roses`、`sunflowers`、`tulips`。无预测样本或无真实样本导致分母为零时，对应 precision、recall 或 F1 记为 0，不产生 NaN。Test 只能在 validation 选出 best checkpoint 后执行。
+
+每个 epoch 结束后，使用 train manifest 的确定性预处理副本记录 train loss/accuracy，并使用 validation manifest 记录 validation loss/accuracy；这些只读评估不参与梯度更新。`best_epoch_train_accuracy` 必须取自 validation 选中 best checkpoint 的同一个 epoch，用于计算 `train_test_gap`。
 
 ## 7. 文件命名建议
 

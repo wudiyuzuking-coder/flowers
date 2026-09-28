@@ -1,0 +1,50 @@
+{
+  "seed": 42,
+  "split_ratios": {
+    "train": 0.7,
+    "val": 0.1,
+    "test": 0.2
+  },
+  "data_root": "flower_photos",
+  "total_samples": 3670,
+  "class_counts": {
+    "daisy": 633,
+    "dandelion": 898,
+    "roses": 641,
+    "sunflowers": 699,
+    "tulips": 799
+  },
+  "split_counts": {
+    "train": 2568,
+    "val": 367,
+    "test": 735
+  },
+  "split_class_counts": {
+    "train": {
+      "daisy": 443,
+      "dandelion": 628,
+      "roses": 449,
+      "sunflowers": 489,
+      "tulips": 559
+    },
+    "val": {
+      "daisy": 63,
+      "dandelion": 90,
+      "roses": 64,
+      "sunflowers": 70,
+      "tulips": 80
+    },
+    "test": {
+      "daisy": 127,
+      "dandelion": 180,
+      "roses": 128,
+      "sunflowers": 140,
+      "tulips": 160
+    }
+  },
+  "manifest_sha256": {
+    "train.txt": "e3746f3898a0bf61e9082dad57e3b7da60cd0ad5d37cfef8df6c3f86a48e7aee",
+    "val.txt": "cd1d81e02b8b4a8089258f48a37d692805d3cdf642ea54350964493db3daec95",
+    "test.txt": "560d77f600d243e2ea1f084bebd49d8b1dbb7ce65ee2b2fa1ecce82adc4136b3"
+  }
+}

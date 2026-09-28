@@ -24,6 +24,11 @@ from mindspore.train import Model
 from mindspore.train.callback import Callback, LossMonitor
 from mindspore.train.serialization import load_checkpoint, save_checkpoint
 
+from evaluation import evaluate_dataset, save_test_evaluation, save_training_curves
+from evaluation import save_confusion_matrix
+from split_manifest import CLASS_INDEXING, ManifestImageSource
+from split_manifest import load_and_validate_split_manifests
+
 # 设置MindSpore的执行模式和设备
 context.set_context(device_target="GPU", mode=mindspore.GRAPH_MODE)
 
@@ -59,6 +64,7 @@ cfg = edict({
     'use_backbone_weight_decay': args.experiment_id in ('E2', 'E3'),
     'use_lr_scheduler': args.experiment_id == 'E3',
     'data_path': './flower_photos',
+    'splits_path': './splits',
     'data_size':3670,
     'image_width': 100,  # 图片宽度
     'image_height': 100,  # 图片高度
@@ -79,21 +85,10 @@ cfg = edict({
     'output_directory': f'./checkpoints/{args.experiment_id}'  # 保存的模型文件路径
 })
 
-CLASS_INDEXING = {'daisy': 0, 'dandelion': 1, 'roses': 2, 'sunflowers': 3, 'tulips': 4}
-
-
 def create_datasets(config):
-    """Split raw samples first, then attach split-specific preprocessing."""
-    raw_dataset = ds.ImageFolderDataset(
-        config.data_path,
-        class_indexing=CLASS_INDEXING,
-        shuffle=False,
-    )
-
-    # The fixed dataset seed makes this split repeatable for an unchanged dataset and
-    # MindSpore version. Formal runs still need a checked-in, stratified split manifest.
-    train_dataset, val_dataset, test_dataset = raw_dataset.split(
-        [0.7, 0.1, 0.2], randomize=True
+    """Build every dataset from the same validated, fixed split manifests."""
+    split_entries, split_info = load_and_validate_split_manifests(
+        config.data_path, config.splits_path
     )
 
     train_operations = [
@@ -123,10 +118,35 @@ def create_datasets(config):
         C.TypeCast(mstype.float32),
     ]
 
+    train_source = ManifestImageSource(
+        config.data_path, split_entries['train'], CLASS_INDEXING
+    )
+    val_source = ManifestImageSource(
+        config.data_path, split_entries['val'], CLASS_INDEXING
+    )
+    test_source = ManifestImageSource(
+        config.data_path, split_entries['test'], CLASS_INDEXING
+    )
+    train_dataset = ds.GeneratorDataset(
+        train_source, column_names=['image', 'label'], shuffle=False
+    )
+    train_eval_dataset = ds.GeneratorDataset(
+        train_source, column_names=['image', 'label'], shuffle=False
+    )
+    val_dataset = ds.GeneratorDataset(
+        val_source, column_names=['image', 'label'], shuffle=False
+    )
+    test_dataset = ds.GeneratorDataset(
+        test_source, column_names=['image', 'label'], shuffle=False
+    )
+
     train_dataset = train_dataset.map(
         input_columns="image", operations=train_operations, num_parallel_workers=8
     )
-    train_dataset = train_dataset.shuffle(buffer_size=config.data_size)
+    train_dataset = train_dataset.shuffle(buffer_size=len(train_source))
+    train_eval_dataset = train_eval_dataset.map(
+        input_columns="image", operations=eval_operations, num_parallel_workers=8
+    )
     val_dataset = val_dataset.map(
         input_columns="image", operations=eval_operations, num_parallel_workers=8
     )
@@ -136,12 +156,15 @@ def create_datasets(config):
 
     # model.train controls epoch repetition. Validation and test are single-pass.
     train_dataset = train_dataset.batch(config.batch_size, drop_remainder=True)
+    train_eval_dataset = train_eval_dataset.batch(
+        config.batch_size, drop_remainder=False
+    )
     val_dataset = val_dataset.batch(config.batch_size, drop_remainder=False)
     test_dataset = test_dataset.batch(config.batch_size, drop_remainder=False)
-    return train_dataset, val_dataset, test_dataset
+    return train_dataset, train_eval_dataset, val_dataset, test_dataset, split_info
 
 
-de_train, de_val, de_test = create_datasets(cfg)
+de_train, de_train_eval, de_val, de_test, split_info = create_datasets(cfg)
 print('实验编号：', cfg.experiment_id)
 print('启用额外数据增强：', cfg.use_extra_augmentation)
 print('启用 Backbone Weight Decay：', cfg.use_backbone_weight_decay)
@@ -149,6 +172,8 @@ print('启用 Learning Rate Scheduler：', cfg.use_lr_scheduler)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
+print('固定 split 样本数：', split_info['split_counts'])
+print('固定 split manifest SHA-256：', split_info['manifest_sha256'])
 
 
 # 定义CNN图像识别网络
@@ -344,39 +369,60 @@ else:
     print(f"Configured learning rate curve: {lr_curve_path}")
 #设置Adam优化器
 net_opt = nn.Adam(group_params, learning_rate=optimizer_learning_rate, weight_decay=0.0)
- 
-loss_list = []
-class CustomLossMonitor(LossMonitor):
-    # 在每个训练epoch结束时自动调用，重写
-    def epoch_end(self, run_context):
-        cb_params = run_context.original_args()
-        loss_list.append(cb_params.net_outputs.asnumpy())  # 记录每个 epoch 的损失
-        super().epoch_end(run_context)  # 调用原 LossMonitor 的方法
-
 model = Model(net, loss_fn=net_loss, optimizer=net_opt, metrics={"Accuracy": nn.Accuracy()})
-loss_cb = CustomLossMonitor(per_print_times=de_train.get_dataset_size())
+loss_cb = LossMonitor(per_print_times=de_train.get_dataset_size())
 
 
 class BestValidationCheckpoint(Callback):
-    """Select and save the model using validation accuracy only."""
-    def __init__(self, model_to_eval, network, val_dataset, checkpoint_path):
+    """Record deterministic train/val metrics and select by validation accuracy."""
+    def __init__(
+        self,
+        model_to_eval,
+        network,
+        train_eval_dataset,
+        val_dataset,
+        checkpoint_path,
+    ):
         super().__init__()
         self.model_to_eval = model_to_eval
         self.network = network
+        self.train_eval_dataset = train_eval_dataset
         self.val_dataset = val_dataset
         self.checkpoint_path = checkpoint_path
         self.best_accuracy = -1.0
         self.best_epoch = None
+        self.best_epoch_train_accuracy = None
+        self.history = {
+            'train_loss': [],
+            'train_accuracy': [],
+            'val_loss': [],
+            'val_accuracy': [],
+        }
 
     def epoch_end(self, run_context):
         cb_params = run_context.original_args()
-        metrics = self.model_to_eval.eval(self.val_dataset, dataset_sink_mode=False)
-        accuracy = float(metrics['Accuracy'])
         epoch = int(cb_params.cur_epoch_num)
-        print(f"Validation epoch {epoch}: Accuracy={accuracy:.6f}")
+        selection_metrics = self.model_to_eval.eval(
+            self.val_dataset, dataset_sink_mode=False
+        )
+        accuracy = float(selection_metrics['Accuracy'])
+        train_metrics, _, _ = evaluate_dataset(
+            self.model_to_eval, self.train_eval_dataset
+        )
+        val_metrics, _, _ = evaluate_dataset(self.model_to_eval, self.val_dataset)
+        self.history['train_loss'].append(train_metrics['loss'])
+        self.history['train_accuracy'].append(train_metrics['accuracy'])
+        self.history['val_loss'].append(val_metrics['loss'])
+        self.history['val_accuracy'].append(accuracy)
+        print(
+            f"Epoch {epoch}: train_loss={train_metrics['loss']:.6f}, "
+            f"train_accuracy={train_metrics['accuracy']:.6f}, "
+            f"val_loss={val_metrics['loss']:.6f}, val_accuracy={accuracy:.6f}"
+        )
         if accuracy > self.best_accuracy:
             self.best_accuracy = accuracy
             self.best_epoch = epoch
+            self.best_epoch_train_accuracy = float(train_metrics['accuracy'])
             os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
             save_checkpoint(self.network, self.checkpoint_path)
             print(f"Saved new best validation checkpoint: {self.checkpoint_path}")
@@ -385,25 +431,34 @@ class BestValidationCheckpoint(Callback):
 best_checkpoint_path = os.path.join(
     cfg.output_directory, f"{cfg.output_prefix}.ckpt"
 )
-validation_cb = BestValidationCheckpoint(model, net, de_val, best_checkpoint_path)
+validation_cb = BestValidationCheckpoint(
+    model, net, de_train_eval, de_val, best_checkpoint_path
+)
 print("============== Starting Training ==============")
 model.train(cfg.epoch_size, de_train, callbacks=[loss_cb, validation_cb], dataset_sink_mode=True)
- 
-plt.figure()
-plt.plot(range(1, len(loss_list) + 1), loss_list, marker='o', linestyle='-')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training Loss Curve')
-plt.grid(True)
-curve_directory = os.path.join('./flower_savefig', cfg.experiment_id)
-os.makedirs(curve_directory, exist_ok=True)
-plt.savefig(os.path.join(curve_directory, 'train_loss_curve.png'))
-plt.close()  # 关闭图像，不显示
+training_curve_path = save_training_curves(validation_cb.history, cfg.experiment_id)
+print('Training/validation curves:', training_curve_path)
 
 # 测试集只评估由 validation accuracy 选出的最佳 checkpoint。
 print("============== Starting Evaluation ==============")
 load_checkpoint(best_checkpoint_path, net=net)
-metric = model.eval(de_test,dataset_sink_mode=False)
+test_metrics, _, _ = evaluate_dataset(model, de_test)
+confusion_matrix_path = save_confusion_matrix(
+    test_metrics['confusion_matrix'],
+    cfg.experiment_id,
+    './results/confusion_matrix',
+)
+evaluation_output, evaluation_path = save_test_evaluation(
+    test_metrics,
+    cfg.experiment_id,
+    validation_cb.best_epoch,
+    validation_cb.best_accuracy,
+    validation_cb.best_epoch_train_accuracy,
+    best_checkpoint_path,
+)
 print('Best validation epoch:', validation_cb.best_epoch)
 print('Best validation accuracy:', validation_cb.best_accuracy)
-print(metric)
+print('Best epoch train accuracy:', validation_cb.best_epoch_train_accuracy)
+print('Test evaluation:', evaluation_output)
+print('Evaluation JSON:', evaluation_path)
+print('Confusion matrix:', confusion_matrix_path)

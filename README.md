@@ -2,7 +2,7 @@
 
 这是一个 5 人协作的课程项目。项目在现有花卉分类代码基础上，通过统一的 Baseline、问题诊断、单变量改进、消融实验和错误分析，形成可复现的模型改进结论与课程报告。
 
-> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1|E2|E3` 运行同一套自定义 ResNet18 训练代码；E1 仅增加训练集数据增强，E2 扩大 weight decay 作用范围，E3 在完整继承 E2 的基础上增加 cosine learning-rate schedule。尚未进行正式实验或填写实验结果。
+> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1|E2|E3` 运行同一套自定义 ResNet18 训练代码；E1 仅增加训练集数据增强，E2 扩大 weight decay 作用范围，E3 增加 cosine learning-rate schedule。所有实验统一读取固定分层 split manifest，并共用同一评估模块。尚未进行正式实验或填写实验结果。
 
 ## 项目目标
 
@@ -41,6 +41,11 @@
 │   ├── confusion_matrix/        # 经复核的混淆矩阵
 │   ├── curves/                  # 经复核的训练/验证曲线
 │   └── error_cases/             # 代表性错例可视化
+├── splits/                      # 固定、分层的 train/val/test manifest 与校验信息
+├── tools/
+│   └── generate_split_manifest.py # 一次性生成固定 split
+├── evaluation.py               # 公共指标、曲线与混淆矩阵实现
+├── split_manifest.py           # manifest 生成、校验和数据源
 ├── flower_photos/               # 当前本地原始数据集，已在 .gitignore 中忽略
 ├── ms3.py                       # 现有训练脚本
 ├── ms3_val.py                   # 现有预测/评估脚本
@@ -65,7 +70,15 @@ MindSpore 的 CPU/GPU 安装包与 Python、操作系统及加速环境存在兼
 
 ## 启动与训练
 
-训练入口（默认 E0）：
+首次正式实验前先生成一次固定 split：
+
+```powershell
+python tools/generate_split_manifest.py
+```
+
+生成器使用 seed 42，在每个类别内部独立打乱并按约 70%/10%/20% 分配。`splits/split_info.json` 记录类别分布与三个 manifest 的 SHA-256；如果文件已存在，默认拒绝覆盖，只有明确传入 `--force` 才会重新生成。
+
+之后运行训练（默认 E0）：
 
 ```powershell
 python ms3.py --experiment-id E0
@@ -85,7 +98,7 @@ python ms3_val.py
 1. `ms3.py` 使用仓库内相对路径 `./flower_photos`；`ms3_val.py` 仍保留原开发机的数据和 checkpoint 绝对路径。
 2. `ms3.py` 指定 `device_target="GPU"`，`ms3_val.py` 指定 `CPU`；正式训练前需验证 MindSpore 与 GPU 环境。
 3. `ms3.py` 当前通过命令行实验编号控制 E0/E1/E2/E3，尚不读取 `configs/` 文件。
-4. 当前代码按固定 seed 划分 70% train / 10% validation / 20% test，并在划分后设置各自 transform。正式 E0/E1/E2/E3 前仍需生成不可变、按类别分层的 split manifest，避免依赖 MindSpore 版本和数据目录状态。
+4. E0～E3 全部读取 `splits/train.txt`、`splits/val.txt` 和 `splits/test.txt`，训练启动时会验证 SHA-256、交集、全集覆盖、类别数量和本地数据漂移。
 
 这些问题会影响直接运行和实验可比性，因此本 README 不声称当前命令开箱即用。
 
@@ -102,6 +115,8 @@ python ms3_val.py
 | E6 | E5 + Class Weight | 仅在类别不平衡明显时验证类别权重 |
 
 当前 E0～E3 均使用 `ms3.py` 中同一份自定义 ResNet18 和 Adam。E1 不替换模型，只增加训练集数据增强；E2 不改变 E1 增强，仅将 weight decay 从 `fc.weight=0.01` 扩展到 Backbone Conv/Dense weight（`0.0001`）；E3 完整继承 E2，仅把固定 `0.0001` 学习率改为从 `0.0001` 到 `0.000001` 的逐 step cosine schedule。
+
+训练期间统一记录确定性 train-evaluation 与 validation 的 loss/accuracy，并仍以 validation accuracy 选择 best checkpoint。加载 best checkpoint 后，公共评估模块遍历完整 test manifest，输出 Overall Accuracy、Macro Precision/Recall/F1、分类别指标、worst-class recall、train-test gap、JSON 和混淆矩阵。zero division 统一按 0 处理；`results/metrics.csv` 不会被训练脚本自动修改。
 
 ## 实验结果记录规范
 
