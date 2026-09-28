@@ -37,14 +37,15 @@ ds.config.set_seed(seed)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the E0, E1, or E2 flower experiment.")
+    parser = argparse.ArgumentParser(description="Run the E0-E3 flower experiments.")
     parser.add_argument(
         "--experiment-id",
-        choices=("E0", "E1", "E2"),
+        choices=("E0", "E1", "E2", "E3"),
         default="E0",
         help=(
             "E0 is the baseline; E1 adds conservative augmentation; "
-            "E2 keeps E1 and extends weight decay to backbone weights."
+            "E2 keeps E1 and extends weight decay to backbone weights; "
+            "E3 keeps E2 and adds cosine learning-rate decay."
         ),
     )
     return parser.parse_args()
@@ -54,8 +55,9 @@ args = parse_args()
 
 cfg = edict({
     'experiment_id': args.experiment_id,
-    'use_extra_augmentation': args.experiment_id in ('E1', 'E2'),
-    'use_backbone_weight_decay': args.experiment_id == 'E2',
+    'use_extra_augmentation': args.experiment_id in ('E1', 'E2', 'E3'),
+    'use_backbone_weight_decay': args.experiment_id in ('E2', 'E3'),
+    'use_lr_scheduler': args.experiment_id == 'E3',
     'data_path': './flower_photos',
     'data_size':3670,
     'image_width': 100,  # 图片宽度
@@ -66,6 +68,7 @@ cfg = edict({
     'weight_decay': 0.01,
     'backbone_weight_decay': 0.0001,
     'lr':0.0001,  # 学习率
+    'min_lr': 0.000001,
     'dropout_ratio': 0.5,
     'epoch_size': 10,  # 训练次数
     'per_print_times': 10,  # 每10步打印一次
@@ -142,6 +145,7 @@ de_train, de_val, de_test = create_datasets(cfg)
 print('实验编号：', cfg.experiment_id)
 print('启用额外数据增强：', cfg.use_extra_augmentation)
 print('启用 Backbone Weight Decay：', cfg.use_backbone_weight_decay)
+print('启用 Learning Rate Scheduler：', cfg.use_lr_scheduler)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
@@ -285,8 +289,61 @@ for group_index, group in enumerate(group_params):
         f"Optimizer group {group_index}: weight_decay={group['weight_decay']}, "
         f"parameters={[param.name for param in group['params']]}"
     )
+
+
+def create_learning_rate(config, steps_per_epoch):
+    """Return a fixed LR or an exact per-step cosine schedule Tensor."""
+    if not config.use_lr_scheduler:
+        return config.lr, None
+
+    total_steps = int(steps_per_epoch * config.epoch_size)
+    if total_steps < 2:
+        raise ValueError("Cosine learning-rate decay requires at least two training steps.")
+
+    progress = np.linspace(0.0, 1.0, total_steps, dtype=np.float64)
+    learning_rate_values = config.min_lr + 0.5 * (config.lr - config.min_lr) * (
+        1.0 + np.cos(np.pi * progress)
+    )
+    learning_rate_values = learning_rate_values.astype(np.float32)
+    learning_rate_tensor = mindspore.Tensor(learning_rate_values, mstype.float32)
+    return learning_rate_tensor, learning_rate_values
+
+
+def save_learning_rate_curve(learning_rate_values, experiment_id):
+    """Save the configured schedule values; this does not change training."""
+    curve_directory = './results/curves'
+    os.makedirs(curve_directory, exist_ok=True)
+    curve_path = os.path.join(curve_directory, f'{experiment_id}_lr_curve.png')
+    plt.figure()
+    plt.plot(
+        np.arange(1, len(learning_rate_values) + 1),
+        learning_rate_values,
+        linestyle='-',
+    )
+    plt.xlabel('Optimizer Step')
+    plt.ylabel('Learning Rate')
+    plt.title(f'{experiment_id} Configured Cosine Learning Rate')
+    plt.grid(True)
+    plt.savefig(curve_path)
+    plt.close()
+    return curve_path
+
+
+steps_per_epoch = de_train.get_dataset_size()
+optimizer_learning_rate, configured_lr_values = create_learning_rate(
+    cfg, steps_per_epoch
+)
+if configured_lr_values is None:
+    print(f"Learning rate: fixed at {cfg.lr}")
+else:
+    lr_curve_path = save_learning_rate_curve(configured_lr_values, cfg.experiment_id)
+    print("Learning rate scheduler: per-step cosine decay")
+    print(f"Initial learning rate: {configured_lr_values[0]:.8f}")
+    print(f"Final learning rate: {configured_lr_values[-1]:.8f}")
+    print(f"Total decay steps: {len(configured_lr_values)}")
+    print(f"Configured learning rate curve: {lr_curve_path}")
 #设置Adam优化器
-net_opt = nn.Adam(group_params, learning_rate=cfg.lr, weight_decay=0.0)
+net_opt = nn.Adam(group_params, learning_rate=optimizer_learning_rate, weight_decay=0.0)
  
 loss_list = []
 class CustomLossMonitor(LossMonitor):
