@@ -2,7 +2,7 @@
 
 这是一个 5 人协作的课程项目。项目在现有花卉分类代码基础上，通过统一的 Baseline、问题诊断、单变量改进、消融实验和错误分析，形成可复现的模型改进结论与课程报告。
 
-> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1` 运行同一套自定义 ResNet18 训练代码；E1 仅在训练集上增加额外数据增强。尚未进行正式实验或填写实验结果。
+> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1|E2` 运行同一套自定义 ResNet18 训练代码；E1 仅增加训练集数据增强，E2 在完整继承 E1 的基础上扩大 weight decay 的作用范围。尚未进行正式实验或填写实验结果。
 
 ## 项目目标
 
@@ -70,6 +70,7 @@ MindSpore 的 CPU/GPU 安装包与 Python、操作系统及加速环境存在兼
 ```powershell
 python ms3.py --experiment-id E0
 python ms3.py --experiment-id E1
+python ms3.py --experiment-id E2
 ```
 
 现有加载 checkpoint 并预测/评估的入口：
@@ -82,8 +83,8 @@ python ms3_val.py
 
 1. `ms3.py` 使用仓库内相对路径 `./flower_photos`；`ms3_val.py` 仍保留原开发机的数据和 checkpoint 绝对路径。
 2. `ms3.py` 指定 `device_target="GPU"`，`ms3_val.py` 指定 `CPU`；正式训练前需验证 MindSpore 与 GPU 环境。
-3. `ms3.py` 当前通过命令行实验编号控制 E0/E1，尚不读取 `configs/` 文件。
-4. 当前代码按固定 seed 划分 70% train / 10% validation / 20% test，并在划分后设置各自 transform。正式 E0/E1 前仍需生成不可变、按类别分层的 split manifest，避免依赖 MindSpore 版本和数据目录状态。
+3. `ms3.py` 当前通过命令行实验编号控制 E0/E1/E2，尚不读取 `configs/` 文件。
+4. 当前代码按固定 seed 划分 70% train / 10% validation / 20% test，并在划分后设置各自 transform。正式 E0/E1/E2 前仍需生成不可变、按类别分层的 split manifest，避免依赖 MindSpore 版本和数据目录状态。
 
 这些问题会影响直接运行和实验可比性，因此本 README 不声称当前命令开箱即用。
 
@@ -93,13 +94,13 @@ python ms3_val.py
 |---|---|---|
 | E0 | Baseline CNN | 建立统一基准并完成问题诊断 |
 | E1 | E0 + Data Augmentation | 验证数据增强的贡献 |
-| E2 | E1 + Weight Decay | 验证正则化的贡献 |
+| E2 | E1 + Wider Weight Decay | 验证将衰减从 FC weight 扩展到 Backbone Conv/Dense weight 的贡献 |
 | E3 | E2 + LR Scheduler | 验证学习率调度的贡献 |
 | E4 | Pretrained Model | 验证迁移学习的贡献 |
 | E5 | E4 + Fine-tuning | 验证解冻微调的贡献 |
 | E6 | E5 + Class Weight | 仅在类别不平衡明显时验证类别权重 |
 
-当前 E0 与 E1 均使用 `ms3.py` 中同一份自定义 ResNet18；E1 不替换模型，只增加训练集数据增强。
+当前 E0、E1 与 E2 均使用 `ms3.py` 中同一份自定义 ResNet18。E1 不替换模型，只增加训练集数据增强；E2 不改变 E1 增强，仅将 weight decay 从 `fc.weight=0.01` 扩展到 Backbone Conv/Dense weight（`0.0001`）。
 
 ## 实验结果记录规范
 

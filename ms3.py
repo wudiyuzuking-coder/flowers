@@ -37,12 +37,15 @@ ds.config.set_seed(seed)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the E0 or E1 flower experiment.")
+    parser = argparse.ArgumentParser(description="Run the E0, E1, or E2 flower experiment.")
     parser.add_argument(
         "--experiment-id",
-        choices=("E0", "E1"),
+        choices=("E0", "E1", "E2"),
         default="E0",
-        help="E0 uses baseline preprocessing; E1 adds conservative augmentation.",
+        help=(
+            "E0 is the baseline; E1 adds conservative augmentation; "
+            "E2 keeps E1 and extends weight decay to backbone weights."
+        ),
     )
     return parser.parse_args()
 
@@ -51,7 +54,8 @@ args = parse_args()
 
 cfg = edict({
     'experiment_id': args.experiment_id,
-    'use_extra_augmentation': args.experiment_id == 'E1',
+    'use_extra_augmentation': args.experiment_id in ('E1', 'E2'),
+    'use_backbone_weight_decay': args.experiment_id == 'E2',
     'data_path': './flower_photos',
     'data_size':3670,
     'image_width': 100,  # 图片宽度
@@ -60,6 +64,7 @@ cfg = edict({
     'channel': 3,  # 图片通道数
     'num_class':5,  # 分类类别
     'weight_decay': 0.01,
+    'backbone_weight_decay': 0.0001,
     'lr':0.0001,  # 学习率
     'dropout_ratio': 0.5,
     'epoch_size': 10,  # 训练次数
@@ -136,6 +141,7 @@ def create_datasets(config):
 de_train, de_val, de_test = create_datasets(cfg)
 print('实验编号：', cfg.experiment_id)
 print('启用额外数据增强：', cfg.use_extra_augmentation)
+print('启用 Backbone Weight Decay：', cfg.use_backbone_weight_decay)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
@@ -217,16 +223,68 @@ net = ResNet18(num_class=cfg.num_class)
 
 #计算softmax交叉熵。
 net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
-#opt
-# 从所有可训练参数中筛选出全连接层(fc)的权重参数
-fc_weight_params = list(filter(lambda x: 'fc' in x.name and 'weight' in x.name, net.trainable_params()))
-# 创建全连接层权重参数的ID集合，用于快速查找
-fc_weight_param_ids = {id(param) for param in fc_weight_params}
-# 获取除全连接层权重外的所有其他参数
-else_params = [param for param in net.trainable_params() if id(param) not in fc_weight_param_ids]
-# 全连接层权重衰减，其他不衰减，避免全连接层过拟合（全连接层参数量大）
-group_params = [{'params': fc_weight_params, 'weight_decay': cfg.weight_decay},
-                {'params': else_params}]
+# opt
+def create_optimizer_param_groups(network, config):
+    """Build explicit decay groups without relying on parameter-name patterns."""
+    trainable_params = list(network.trainable_params())
+    fc_weight_id = id(network.fc.weight)
+    fc_weight_params = [param for param in trainable_params if id(param) == fc_weight_id]
+    if len(fc_weight_params) != 1:
+        raise ValueError("Expected exactly one trainable FC weight parameter.")
+
+    if not config.use_backbone_weight_decay:
+        # Preserve the E0/E1 grouping: only fc.weight has weight decay.
+        other_params = [param for param in trainable_params if id(param) != fc_weight_id]
+        return [
+            {'params': fc_weight_params, 'weight_decay': config.weight_decay},
+            {'params': other_params, 'weight_decay': 0.0},
+        ]
+
+    # Select weights by their owning Cell type, not by version-dependent names.
+    # The current backbone contains Conv2d layers; the Dense check keeps the rule
+    # explicit if a non-FC Dense layer is later introduced.
+    decay_weight_ids = set()
+    for _, cell in network.cells_and_names():
+        if isinstance(cell, (nn.Conv2d, nn.Dense)) and hasattr(cell, 'weight'):
+            if id(cell.weight) != fc_weight_id:
+                decay_weight_ids.add(id(cell.weight))
+
+    backbone_weight_params = [
+        param for param in trainable_params if id(param) in decay_weight_ids
+    ]
+    no_decay_params = [
+        param for param in trainable_params
+        if id(param) != fc_weight_id and id(param) not in decay_weight_ids
+    ]
+
+    grouped_ids = [
+        id(param)
+        for group in (fc_weight_params, backbone_weight_params, no_decay_params)
+        for param in group
+    ]
+    if len(grouped_ids) != len(set(grouped_ids)) or set(grouped_ids) != {
+        id(param) for param in trainable_params
+    }:
+        raise ValueError("Optimizer parameter groups must cover each trainable parameter once.")
+    if not backbone_weight_params:
+        raise ValueError("E2 requires at least one backbone Conv2d/Dense weight parameter.")
+
+    return [
+        {'params': fc_weight_params, 'weight_decay': config.weight_decay},
+        {
+            'params': backbone_weight_params,
+            'weight_decay': config.backbone_weight_decay,
+        },
+        {'params': no_decay_params, 'weight_decay': 0.0},
+    ]
+
+
+group_params = create_optimizer_param_groups(net, cfg)
+for group_index, group in enumerate(group_params):
+    print(
+        f"Optimizer group {group_index}: weight_decay={group['weight_decay']}, "
+        f"parameters={[param.name for param in group['params']]}"
+    )
 #设置Adam优化器
 net_opt = nn.Adam(group_params, learning_rate=cfg.lr, weight_decay=0.0)
  

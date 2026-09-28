@@ -101,7 +101,7 @@ logs/E1_seed42.log
 |---|---|---|
 | E0 | 无 | 固定 Baseline、split 和评估口径 |
 | E1 | E0 | 仅 Data Augmentation |
-| E2 | E1 | 仅 Weight Decay |
+| E2 | E1 | 仅扩大 Weight Decay 作用范围（保留 FC weight=0.01，新增 Backbone weight decay） |
 | E3 | E2 | 仅 LR Scheduler |
 | E4 | E0 或预先声明的对照 | 模型替换为 Pretrained Model；必须明确对照关系 |
 | E5 | E4 | 解冻策略/Fine-tuning |
