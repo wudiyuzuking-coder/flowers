@@ -1,4 +1,5 @@
 from easydict import EasyDict as edict
+import argparse
 #glob模块主要用于查找符合特定规则的文件路径名，类似使用windows下的文件搜索
 import glob
 #os模块主要用于处理文件和目录
@@ -20,7 +21,8 @@ from mindspore import context
 from mindspore.common.initializer import TruncatedNormal
 from mindspore import nn
 from mindspore.train import Model
-from mindspore.train.callback import ModelCheckpoint, CheckpointConfig, LossMonitor, TimeMonitor
+from mindspore.train.callback import Callback, LossMonitor
+from mindspore.train.serialization import load_checkpoint, save_checkpoint
 
 # 设置MindSpore的执行模式和设备
 context.set_context(device_target="GPU", mode=mindspore.GRAPH_MODE)
@@ -31,8 +33,25 @@ seed = 42  # 设定随机种子
 random.seed(seed)
 np.random.seed(seed)
 mindspore.set_seed(seed)
+ds.config.set_seed(seed)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run the E0 or E1 flower experiment.")
+    parser.add_argument(
+        "--experiment-id",
+        choices=("E0", "E1"),
+        default="E0",
+        help="E0 uses baseline preprocessing; E1 adds conservative augmentation.",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
 
 cfg = edict({
+    'experiment_id': args.experiment_id,
+    'use_extra_augmentation': args.experiment_id == 'E1',
     'data_path': './flower_photos',
     'data_size':3670,
     'image_width': 100,  # 图片宽度
@@ -48,36 +67,78 @@ cfg = edict({
     'sigma':0.01,
     'save_checkpoint_steps': 1000,  # 添加检查点保存步数
     'keep_checkpoint_max': 10,  # 设置最大保存的检查点数量
-    'output_prefix': 'restrain_output_10',  # 保存的模型文件前缀
-    'output_directory': './restrain_output_10'  # 保存的模型文件路径
+    'output_prefix': f'{args.experiment_id}_best',  # 最佳验证集模型文件前缀
+    'output_directory': f'./checkpoints/{args.experiment_id}'  # 保存的模型文件路径
 })
 
-#从目录中读取图像的源数据集。
-de_dataset = ds.ImageFolderDataset(cfg.data_path,
-                                   class_indexing={'daisy':0,'dandelion':1,'roses':2,'sunflowers':3,'tulips':4})
-#解码前将输入图像裁剪成任意大小和宽高比。
-transform_img = CV.RandomCropDecodeResize([cfg.image_width,cfg.image_height], scale=(0.08, 1.0), ratio=(0.75, 1.333))  #改变尺寸
-#转换输入图像；形状（H, W, C）为形状（C, H, W）。
-hwc2chw_op = CV.HWC2CHW()
-#转换为给定MindSpore数据类型的Tensor操作。
-type_cast_op = C.TypeCast(mstype.float32)
-#将操作中的每个操作应用到此数据集。
-de_dataset = de_dataset.map(input_columns="image", num_parallel_workers=8, operations=transform_img)
-de_dataset = de_dataset.map(input_columns="image", operations=hwc2chw_op, num_parallel_workers=8)
-de_dataset = de_dataset.map(input_columns="image", operations=type_cast_op, num_parallel_workers=8)
-de_dataset = de_dataset.shuffle(buffer_size=cfg.data_size)
-#划分训练集测试集
-(de_train,de_test)=de_dataset.split([0.8,0.2])
-#设置每个批处理的行数
-#drop_remainder确定是否删除最后一个可能不完整的批（default=False）。
-#如果为True，并且如果可用于生成最后一个批的batch_size行小于batch_size行，则这些行将被删除，并且不会传播到子节点。
-de_train=de_train.batch(cfg.batch_size, drop_remainder=True)
-#重复此数据集计数次数。
-de_train=de_train.repeat(cfg.epoch_size)
-de_test=de_test.batch(cfg.batch_size, drop_remainder=True)
-de_test=de_test.repeat(cfg.epoch_size)
-print('训练数据集数量：',de_train.get_dataset_size()*cfg.batch_size)#get_dataset_size()获取批处理的大小。
-print('测试数据集数量：',de_test.get_dataset_size()*cfg.batch_size)
+CLASS_INDEXING = {'daisy': 0, 'dandelion': 1, 'roses': 2, 'sunflowers': 3, 'tulips': 4}
+
+
+def create_datasets(config):
+    """Split raw samples first, then attach split-specific preprocessing."""
+    raw_dataset = ds.ImageFolderDataset(
+        config.data_path,
+        class_indexing=CLASS_INDEXING,
+        shuffle=False,
+    )
+
+    # The fixed dataset seed makes this split repeatable for an unchanged dataset and
+    # MindSpore version. Formal runs still need a checked-in, stratified split manifest.
+    train_dataset, val_dataset, test_dataset = raw_dataset.split(
+        [0.7, 0.1, 0.2], randomize=True
+    )
+
+    train_operations = [
+        CV.RandomCropDecodeResize(
+            [config.image_width, config.image_height],
+            scale=(0.08, 1.0),
+            ratio=(0.75, 1.333),
+        )
+    ]
+    if config.use_extra_augmentation:
+        train_operations.extend([
+            CV.RandomHorizontalFlip(prob=0.5),
+            CV.RandomRotation(degrees=10),
+            CV.RandomColorAdjust(
+                brightness=(0.9, 1.1),
+                contrast=(0.9, 1.1),
+                saturation=(0.9, 1.1),
+                hue=(-0.05, 0.05),
+            ),
+        ])
+    train_operations.extend([CV.HWC2CHW(), C.TypeCast(mstype.float32)])
+
+    eval_operations = [
+        CV.Decode(),
+        CV.Resize([config.image_width, config.image_height]),
+        CV.HWC2CHW(),
+        C.TypeCast(mstype.float32),
+    ]
+
+    train_dataset = train_dataset.map(
+        input_columns="image", operations=train_operations, num_parallel_workers=8
+    )
+    train_dataset = train_dataset.shuffle(buffer_size=config.data_size)
+    val_dataset = val_dataset.map(
+        input_columns="image", operations=eval_operations, num_parallel_workers=8
+    )
+    test_dataset = test_dataset.map(
+        input_columns="image", operations=eval_operations, num_parallel_workers=8
+    )
+
+    # model.train controls epoch repetition. Validation and test are single-pass.
+    train_dataset = train_dataset.batch(config.batch_size, drop_remainder=True)
+    val_dataset = val_dataset.batch(config.batch_size, drop_remainder=False)
+    test_dataset = test_dataset.batch(config.batch_size, drop_remainder=False)
+    return train_dataset, val_dataset, test_dataset
+
+
+de_train, de_val, de_test = create_datasets(cfg)
+print('实验编号：', cfg.experiment_id)
+print('启用额外数据增强：', cfg.use_extra_augmentation)
+print('训练批次数：', de_train.get_dataset_size())
+print('验证批次数：', de_val.get_dataset_size())
+print('测试批次数：', de_test.get_dataset_size())
 
 
 # 定义CNN图像识别网络
@@ -179,11 +240,39 @@ class CustomLossMonitor(LossMonitor):
 
 model = Model(net, loss_fn=net_loss, optimizer=net_opt, metrics={"Accuracy": nn.Accuracy()})
 loss_cb = CustomLossMonitor(per_print_times=de_train.get_dataset_size())
-config_ck = CheckpointConfig(save_checkpoint_steps=cfg.save_checkpoint_steps,
-                             keep_checkpoint_max=cfg.keep_checkpoint_max)
-ckpoint_cb = ModelCheckpoint(prefix=cfg.output_prefix, directory=cfg.output_directory, config=config_ck)
+
+
+class BestValidationCheckpoint(Callback):
+    """Select and save the model using validation accuracy only."""
+    def __init__(self, model_to_eval, network, val_dataset, checkpoint_path):
+        super().__init__()
+        self.model_to_eval = model_to_eval
+        self.network = network
+        self.val_dataset = val_dataset
+        self.checkpoint_path = checkpoint_path
+        self.best_accuracy = -1.0
+        self.best_epoch = None
+
+    def epoch_end(self, run_context):
+        cb_params = run_context.original_args()
+        metrics = self.model_to_eval.eval(self.val_dataset, dataset_sink_mode=False)
+        accuracy = float(metrics['Accuracy'])
+        epoch = int(cb_params.cur_epoch_num)
+        print(f"Validation epoch {epoch}: Accuracy={accuracy:.6f}")
+        if accuracy > self.best_accuracy:
+            self.best_accuracy = accuracy
+            self.best_epoch = epoch
+            os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
+            save_checkpoint(self.network, self.checkpoint_path)
+            print(f"Saved new best validation checkpoint: {self.checkpoint_path}")
+
+
+best_checkpoint_path = os.path.join(
+    cfg.output_directory, f"{cfg.output_prefix}.ckpt"
+)
+validation_cb = BestValidationCheckpoint(model, net, de_val, best_checkpoint_path)
 print("============== Starting Training ==============")
-model.train(cfg.epoch_size, de_train, callbacks=[loss_cb, ckpoint_cb], dataset_sink_mode=True)
+model.train(cfg.epoch_size, de_train, callbacks=[loss_cb, validation_cb], dataset_sink_mode=True)
  
 plt.figure()
 plt.plot(range(1, len(loss_list) + 1), loss_list, marker='o', linestyle='-')
@@ -191,10 +280,15 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.title('Training Loss Curve')
 plt.grid(True)
-plt.savefig('./flower_savefig/train_loss_curve.png')  # 保存图片
+curve_directory = os.path.join('./flower_savefig', cfg.experiment_id)
+os.makedirs(curve_directory, exist_ok=True)
+plt.savefig(os.path.join(curve_directory, 'train_loss_curve.png'))
 plt.close()  # 关闭图像，不显示
 
-# 使用测试集评估模型，打印总体准确率
+# 测试集只评估由 validation accuracy 选出的最佳 checkpoint。
 print("============== Starting Evaluation ==============")
+load_checkpoint(best_checkpoint_path, net=net)
 metric = model.eval(de_test,dataset_sink_mode=False)
+print('Best validation epoch:', validation_cb.best_epoch)
+print('Best validation accuracy:', validation_cb.best_accuracy)
 print(metric)

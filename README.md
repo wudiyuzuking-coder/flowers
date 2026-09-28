@@ -2,7 +2,7 @@
 
 这是一个 5 人协作的课程项目。项目在现有花卉分类代码基础上，通过统一的 Baseline、问题诊断、单变量改进、消融实验和错误分析，形成可复现的模型改进结论与课程报告。
 
-> 当前状态：仓库中保留了原始 `ms3.py`（训练）与 `ms3_val.py`（加载 checkpoint 后预测/评估）。本次仅补充项目管理结构和规范，没有修改模型实现或伪造实验结果。
+> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1` 运行同一套自定义 ResNet18 训练代码；E1 仅在训练集上增加额外数据增强。尚未进行正式实验或填写实验结果。
 
 ## 项目目标
 
@@ -65,10 +65,11 @@ MindSpore 的 CPU/GPU 安装包与 Python、操作系统及加速环境存在兼
 
 ## 启动与训练
 
-现有训练入口：
+训练入口（默认 E0）：
 
 ```powershell
-python ms3.py
+python ms3.py --experiment-id E0
+python ms3.py --experiment-id E1
 ```
 
 现有加载 checkpoint 并预测/评估的入口：
@@ -79,11 +80,10 @@ python ms3_val.py
 
 运行前必须注意：
 
-1. 两个脚本中的 `cfg.data_path` 仍是原开发机的绝对路径，并未自动指向仓库内的 `flower_photos/`。
-2. `ms3_val.py` 中 `CKPT` 也是绝对路径。
-3. 现有脚本指定 `device_target="CPU"`；GPU 训练前需要由训练负责人验证 MindSpore 与设备环境，并在专门分支提交可审查的兼容改动。
-4. 当前代码尚不读取 `configs/`，其中配置文档不能直接驱动训练。
-5. 当前数据流程只有 80% train / 20% test，没有独立 validation split。正式 E0 前需统一生成并固定数据划分清单。
+1. `ms3.py` 使用仓库内相对路径 `./flower_photos`；`ms3_val.py` 仍保留原开发机的数据和 checkpoint 绝对路径。
+2. `ms3.py` 指定 `device_target="GPU"`，`ms3_val.py` 指定 `CPU`；正式训练前需验证 MindSpore 与 GPU 环境。
+3. `ms3.py` 当前通过命令行实验编号控制 E0/E1，尚不读取 `configs/` 文件。
+4. 当前代码按固定 seed 划分 70% train / 10% validation / 20% test，并在划分后设置各自 transform。正式 E0/E1 前仍需生成不可变、按类别分层的 split manifest，避免依赖 MindSpore 版本和数据目录状态。
 
 这些问题会影响直接运行和实验可比性，因此本 README 不声称当前命令开箱即用。
 
@@ -99,7 +99,7 @@ python ms3_val.py
 | E5 | E4 + Fine-tuning | 验证解冻微调的贡献 |
 | E6 | E5 + Class Weight | 仅在类别不平衡明显时验证类别权重 |
 
-注意：现有 `ms3.py` 实际实现的是自定义 ResNet18 风格网络，而计划中的 E0 被描述为 Baseline CNN。正式实验前应由技术负责人明确 E0 到底采用哪份实现，避免把不同模型混作同一基线。
+当前 E0 与 E1 均使用 `ms3.py` 中同一份自定义 ResNet18；E1 不替换模型，只增加训练集数据增强。
 
 ## 实验结果记录规范
 

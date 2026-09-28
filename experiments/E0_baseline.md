@@ -8,24 +8,25 @@
 
 - 对照实验：无
 - 唯一主要变量：不适用（建立基准）
-- 保持不变的变量：E0 完成后再确定并冻结
+- 保持不变的变量：与 E1 使用相同模型、损失、优化器、学习率、batch size、seed、FC weight decay、epoch 数、类别数量、数据划分和评估流程
 
 ## 配置
 
 - Git commit SHA：待实验
-- 配置文件：待创建
-- 数据划分清单/校验值：待创建
-- Random seed：待确认
-- 模型：待确认（计划中的 Baseline CNN 与现有自定义 ResNet18 需先统一口径）
-- Batch size：待确认
-- Epochs：待确认
-- Optimizer：待确认
-- Learning rate：待确认
-- Scheduler：待确认
-- Augmentation：待确认
-- Weight decay：待确认
-- Dropout：待确认
-- Class weight：待确认
+- 启动命令：`python ms3.py --experiment-id E0`
+- 配置方式：`ms3.py` 中共享配置 + `experiment_id=E0`
+- 数据划分清单/校验值：待创建；当前代码以 seed=42 划分 70% train / 10% validation / 20% test
+- Random seed：42
+- 模型：自定义 ResNet18
+- Batch size：32
+- Epochs：10
+- Optimizer：Adam
+- Learning rate：0.0001
+- Scheduler：none
+- Augmentation：训练集仅 `RandomCropDecodeResize`；validation/test 使用确定性 decode + resize + 类型转换 + HWC2CHW
+- Weight decay：仅 FC weight，0.01
+- Dropout：none（配置中的 `dropout_ratio` 未被模型使用）
+- Class weight：none
 - Python / MindSpore / 驱动：待确认
 - 训练设备：待确认
 - 负责人：待分配
@@ -64,4 +65,3 @@
 
 - 决策：待决定
 - 理由：需先完成 E0 复现、评估与问题诊断。
-
