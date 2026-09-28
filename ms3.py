@@ -23,7 +23,7 @@ from mindspore.train import Model
 from mindspore.train.callback import ModelCheckpoint, CheckpointConfig, LossMonitor, TimeMonitor
 
 # 设置MindSpore的执行模式和设备
-context.set_context(device_target="CPU", mode=mindspore.GRAPH_MODE)
+context.set_context(device_target="GPU", mode=mindspore.GRAPH_MODE)
 
 import random
  
@@ -191,7 +191,7 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.title('Training Loss Curve')
 plt.grid(True)
-plt.savefig(r'E:\CodeFile\pythonProject\pythonProject\flowers\train_loss_curve.png')  # 保存图片
+plt.savefig('./flower_savefig/train_loss_curve.png')  # 保存图片
 plt.close()  # 关闭图像，不显示
 
 # 使用测试集评估模型，打印总体准确率
