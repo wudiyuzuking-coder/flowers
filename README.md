@@ -33,6 +33,8 @@
 ├── configs/                     # 实验配置约定（当前代码尚未接入配置加载）
 ├── docs/
 │   ├── EXPERIMENT_GUIDE.md      # 实验记录和复现规范
+│   ├── EXPERIMENT_RUNBOOK.md    # E0～E6 正式运行主操作手册
+│   ├── RESULT_HANDOFF_TEMPLATE.md # 单次正式实验结果交付模板
 │   └── GITHUB_WORKFLOW.md       # 分支、Commit、PR 协作规范
 ├── experiments/
 │   ├── README.md                # 单次实验记录模板与命名规则
@@ -70,6 +72,8 @@ pip install -r requirements.txt
 MindSpore 的 CPU/GPU 安装包与 Python、操作系统及加速环境存在兼容要求。正式训练机应先确定 RTX 5070 Ti 对应的可用环境，再锁定版本；不要只依赖未锁版本的 `requirements.txt` 作为复现依据。
 
 ## 启动与训练
+
+正式实验请先完整阅读 [E0～E6 实验运行手册](docs/EXPERIMENT_RUNBOOK.md)，并使用 [结果交付模板](docs/RESULT_HANDOFF_TEMPLATE.md) 记录每次正式 run。README 仅提供快速入口，环境、preflight、产物核对、`metrics.csv` 回填和 test 使用纪律均以 Runbook 为准。
 
 首次正式实验前先生成一次固定 split：
 
