@@ -27,7 +27,7 @@
 - 清单文件路径和 SHA-256（或等价校验值）；
 - 是否存在重复、损坏或泄漏样本。
 
-当前源码只有 80% train / 20% test，且未建立独立 validation 集。这个状态不满足正式实验规范，应在后续专项代码变更中修正，但不得在不同实验中临时重新随机切分。
+当前代码统一读取 `splits/train.txt`、`splits/val.txt` 和 `splits/test.txt`，使用 seed 42 按类别分层生成约 70%/10%/20% 的固定划分。`splits/split_info.json` 保存各类别与各 split 数量以及 manifest SHA-256。所有正式实验必须复用这组文件；重新生成只能通过显式 `--force`，且一旦重生成，E0～后续对比实验必须全部重跑。
 
 ## 4. 每个实验必须记录的字段
 
@@ -81,6 +81,10 @@
 8. 更新 `experiments/<id>_<slug>.md` 与 `results/metrics.csv`。
 9. 提交 PR，由对应负责人检查变量隔离、指标口径和复现信息。
 
+公共评估模块对完整 test manifest 仅遍历一次，统一采用固定类别顺序 `daisy`、`dandelion`、`roses`、`sunflowers`、`tulips`。无预测样本或无真实样本导致分母为零时，对应 precision、recall 或 F1 记为 0，不产生 NaN。Test 只能在 validation 选出 best checkpoint 后执行。
+
+每个 epoch 结束后，使用 train manifest 的确定性预处理副本记录 train loss/accuracy，并使用 validation manifest 记录 validation loss/accuracy；这些只读评估不参与梯度更新。`best_epoch_train_accuracy` 必须取自 validation 选中 best checkpoint 的同一个 epoch，用于计算 `train_test_gap`。
+
 ## 7. 文件命名建议
 
 ```text
@@ -101,10 +105,10 @@ logs/E1_seed42.log
 |---|---|---|
 | E0 | 无 | 固定 Baseline、split 和评估口径 |
 | E1 | E0 | 仅 Data Augmentation |
-| E2 | E1 | 仅 Weight Decay |
-| E3 | E2 | 仅 LR Scheduler |
-| E4 | E0 或预先声明的对照 | 模型替换为 Pretrained Model；必须明确对照关系 |
-| E5 | E4 | 解冻策略/Fine-tuning |
-| E6 | E5 | 仅 Class Weight，且需先证明不平衡值得处理 |
+| E2 | E1 | 仅扩大 Weight Decay 作用范围（保留 FC weight=0.01，新增 Backbone weight decay） |
+| E3 | E2 | 仅 Cosine LR Scheduler（Adam 不变，逐 step 衰减） |
+| E4 | 独立迁移学习基线 | ImageNet pretrained ResNet18 + frozen Backbone + 新 5 类分类头；不继承 E1～E3 |
+| E5 | E4 | 仅 partial fine-tuning `layer4`；其余 Backbone 保持冻结，所有 BatchNorm running statistics 固定 |
+| E6 | E5 | 仅 Class-weighted Loss；权重只能由 train manifest 按 normalized inverse frequency 自动计算 |
 
-E4 跨模型结构，不能简单视为在 E3 上只增加一个训练参数；报告中应把 Baseline 攭进链（E0～E3）与迁移学习链（E4～E6）的比较关系写清楚。
+实验关系必须写成两条链：Baseline improvement track 为 E0→E1→E2→E3；Transfer learning track 为 E4→E5→E6，其中 E6 是 conditional/candidate imbalance experiment。E4 使用不同模型实现、ImageNet 初始化及其配套输入预处理，不能简单视为在 E3 上只增加一个训练参数，也不能把它与 E0～E3 的差异解释为单一变量贡献。E5 以 E4 为直接对照，唯一核心变化是只解冻 `layer4` 做 partial fine-tuning；不得同时引入额外增强或 scheduler。E6 必须完整继承 E5，唯一主要变化是 class-weighted loss；权重只能由 `splits/train.txt` 按 `w_c = N / (K * n_c)` 自动统计，不得参考 validation/test 数量或表现。E4/E5/E6 必须复用同一 split manifest、统一 evaluation、Validation Accuracy best-checkpoint 选择和最终 test 流程。E6 是否纳入核心改进链，必须等待正式诊断和实验，不得预设有效。
