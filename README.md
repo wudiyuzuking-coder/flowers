@@ -2,7 +2,7 @@
 
 这是一个 5 人协作的课程项目。项目在现有花卉分类代码基础上，通过统一的 Baseline、问题诊断、单变量改进、消融实验和错误分析，形成可复现的模型改进结论与课程报告。
 
-> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1|E2|E3|E4` 运行两条实验链。E0～E3 使用同一套自定义 ResNet18；E4 是独立的迁移学习基线，使用 ImageNet pretrained MindCV ResNet18、冻结 Backbone，并只训练新的 5 类分类头。所有实验统一读取固定分层 split manifest，并共用同一评估模块。尚未进行正式实验或填写实验结果。
+> 当前状态：`ms3.py` 可通过 `--experiment-id E0|E1|E2|E3|E4|E5` 运行两条实验链。E0～E3 使用同一套自定义 ResNet18；E4 是冻结 Backbone 的迁移学习基线；E5 完整继承 E4，并只解冻 `layer4` 做 partial fine-tuning。所有实验统一读取固定分层 split manifest，并共用同一评估模块。尚未进行正式实验或填写实验结果。
 
 ## 项目目标
 
@@ -19,7 +19,7 @@
 - NumPy
 - Matplotlib
 - EasyDict
-- MindCV 0.3.0（仅 E4 的官方 ImageNet pretrained ResNet18）
+- MindCV 0.3.0（E4/E5 的官方 ImageNet pretrained ResNet18）
 - 数据集：5 类花卉图片（daisy、dandelion、roses、sunflowers、tulips）
 - 当前模型代码：自定义 ResNet18 风格网络
 
@@ -87,12 +87,14 @@ python ms3.py --experiment-id E1
 python ms3.py --experiment-id E2
 python ms3.py --experiment-id E3
 python ms3.py --experiment-id E4
+python ms3.py --experiment-id E5
 ```
 
-E4 默认由 MindCV 下载或复用缓存中的官方 ResNet18 ImageNet checkpoint。无网络环境可预先取得同一个官方 1000 类 checkpoint，并严格离线加载：
+E4/E5 默认由 MindCV 下载或复用缓存中的官方 ResNet18 ImageNet checkpoint。无网络环境可预先取得同一个官方 1000 类 checkpoint，并严格离线加载：
 
 ```powershell
 python ms3.py --experiment-id E4 --pretrained-checkpoint C:\path\to\resnet18-1e65cd21.ckpt
+python ms3.py --experiment-id E5 --pretrained-checkpoint C:\path\to\resnet18-1e65cd21.ckpt
 ```
 
 离线 checkpoint 必须与 MindCV 0.3.0 的 1000 类 ResNet18 完整匹配；缺失文件或任何参数不匹配都会终止运行，不会静默退回随机初始化。
@@ -107,9 +109,9 @@ python ms3_val.py
 
 1. `ms3.py` 使用仓库内相对路径 `./flower_photos`；`ms3_val.py` 仍保留原开发机的数据和 checkpoint 绝对路径。
 2. `ms3.py` 指定 `device_target="GPU"`，`ms3_val.py` 指定 `CPU`；正式训练前需验证 MindSpore 与 GPU 环境。
-3. `ms3.py` 当前通过命令行实验编号控制 E0/E1/E2/E3/E4，尚不读取 `configs/` 文件。
-4. E0～E4 全部读取 `splits/train.txt`、`splits/val.txt` 和 `splits/test.txt`，训练启动时会验证 SHA-256、交集、全集覆盖、类别数量和本地数据漂移。
-5. E4 依赖 MindCV 0.3.0；当前开发环境未完成 MindSpore/MindCV 运行级验证，正式训练前必须做 checkpoint 加载、冻结参数和单批更新 smoke test。
+3. `ms3.py` 当前通过命令行实验编号控制 E0/E1/E2/E3/E4/E5，尚不读取 `configs/` 文件。
+4. E0～E5 全部读取 `splits/train.txt`、`splits/val.txt` 和 `splits/test.txt`，训练启动时会验证 SHA-256、交集、全集覆盖、类别数量和本地数据漂移。
+5. E4/E5 依赖 MindCV 0.3.0；当前开发环境未完成 MindSpore/MindCV 运行级验证，正式训练前必须做 checkpoint 加载、冻结参数和单批更新 smoke test。
 
 这些问题会影响直接运行和实验可比性，因此本 README 不声称当前命令开箱即用。
 
@@ -122,7 +124,7 @@ python ms3_val.py
 | E2 | E1 + Wider Weight Decay | 验证将衰减从 FC weight 扩展到 Backbone Conv/Dense weight 的贡献 |
 | E3 | E2 + Cosine LR Scheduler | 验证逐 step 动态学习率的贡献 |
 | E4 | ImageNet Pretrained ResNet18 + Frozen Backbone | 建立只训练新 5 类头的迁移学习基线 |
-| E5 | E4 + Fine-tuning | 验证解冻微调的贡献 |
+| E5 | E4 + Partial Fine-tuning of `layer4` | 验证有限高层语义适配的贡献 |
 | E6 | E5 + Class Weight | 仅在类别不平衡明显时验证类别权重 |
 
 实验结构分为两条链，而不是 E0→E4 的严格线性消融：
@@ -133,6 +135,8 @@ python ms3_val.py
 E0～E3 均使用 `ms3.py` 中同一份自定义 ResNet18 和 Adam。E1 不替换模型，只增加训练集数据增强；E2 不改变 E1 增强，仅将 weight decay 从 `fc.weight=0.01` 扩展到 Backbone Conv/Dense weight（`0.0001`）；E3 完整继承 E2，仅把固定 `0.0001` 学习率改为从 `0.0001` 到 `0.000001` 的逐 step cosine schedule。
 
 E4 不继承 E1～E3 的增强、Backbone weight decay 或 cosine scheduler。它使用 MindCV ResNet18 的官方 ImageNet 权重，冻结 Backbone（包括固定 BatchNorm 统计），替换为 5 类分类头，并保持 Adam、固定 learning rate `0.0001` 与分类头 weight decay `0.01`。E4 使用该预训练权重配套的 224×224 与 ImageNet normalization，因此它是跨模型、跨初始化和配套预处理的迁移学习对照，不能把结果解释为 E3 上某个单变量的独立贡献。
+
+E5 完整继承 E4 的模型、预训练权重、新分类头、输入预处理、split、evaluation 和 checkpoint 流程，唯一核心变化是解冻 `layer4`。E5 仍冻结 `conv1`、`bn1`、`layer1`～`layer3`，并固定所有 BatchNorm running statistics；`layer4` Conv weight 与 BN gamma/beta 使用固定 LR `0.00001`，classifier 使用固定 LR `0.0001`。E5 不启用 E1 augmentation、E2 实验开关或 E3 scheduler，是 partial fine-tuning 而不是 full fine-tuning。
 
 训练期间统一记录确定性 train-evaluation 与 validation 的 loss/accuracy，并仍以 validation accuracy 选择 best checkpoint。加载 best checkpoint 后，公共评估模块遍历完整 test manifest，输出 Overall Accuracy、Macro Precision/Recall/F1、分类别指标、worst-class recall、train-test gap、JSON 和混淆矩阵。zero division 统一按 0 处理；`results/metrics.csv` 不会被训练脚本自动修改。
 

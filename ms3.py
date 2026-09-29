@@ -43,23 +43,24 @@ ds.config.set_seed(seed)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the E0-E4 flower experiments.")
+    parser = argparse.ArgumentParser(description="Run the E0-E5 flower experiments.")
     parser.add_argument(
         "--experiment-id",
-        choices=("E0", "E1", "E2", "E3", "E4"),
+        choices=("E0", "E1", "E2", "E3", "E4", "E5"),
         default="E0",
         help=(
             "E0 is the baseline; E1 adds conservative augmentation; "
             "E2 keeps E1 and extends weight decay to backbone weights; "
             "E3 keeps E2 and adds cosine learning-rate decay; "
-            "E4 is an independent frozen ImageNet-pretrained ResNet18 baseline."
+            "E4 is an independent frozen ImageNet-pretrained ResNet18 baseline; "
+            "E5 keeps E4 and partially fine-tunes layer4."
         ),
     )
     parser.add_argument(
         "--pretrained-checkpoint",
         default="",
         help=(
-            "Optional local official MindCV ResNet18 ImageNet checkpoint for E4. "
+            "Optional local official MindCV ResNet18 ImageNet checkpoint for E4/E5. "
             "When omitted, MindCV downloads its registered pretrained checkpoint."
         ),
     )
@@ -68,31 +69,34 @@ def parse_args():
 
 args = parse_args()
 
-if args.pretrained_checkpoint and args.experiment_id != 'E4':
-    raise ValueError("--pretrained-checkpoint is only valid for experiment E4.")
+if args.pretrained_checkpoint and args.experiment_id not in ('E4', 'E5'):
+    raise ValueError("--pretrained-checkpoint is only valid for experiment E4/E5.")
 
 cfg = edict({
     'experiment_id': args.experiment_id,
     'use_extra_augmentation': args.experiment_id in ('E1', 'E2', 'E3'),
     'use_backbone_weight_decay': args.experiment_id in ('E2', 'E3'),
     'use_lr_scheduler': args.experiment_id == 'E3',
-    'use_pretrained_model': args.experiment_id == 'E4',
+    'use_pretrained_model': args.experiment_id in ('E4', 'E5'),
     'freeze_backbone': args.experiment_id == 'E4',
-    'fine_tune': False,
+    'fine_tune': args.experiment_id == 'E5',
+    'fine_tune_scope': 'layer4' if args.experiment_id == 'E5' else None,
     'pretrained_checkpoint': args.pretrained_checkpoint,
     'pretrained_model_name': 'resnet18',
     'data_path': './flower_photos',
     'splits_path': './splits',
     'data_size':3670,
-    'image_width': 224 if args.experiment_id == 'E4' else 100,  # 图片宽度
-    'image_height': 224 if args.experiment_id == 'E4' else 100,  # 图片高度
-    'eval_resize': 256 if args.experiment_id == 'E4' else 100,
+    'image_width': 224 if args.experiment_id in ('E4', 'E5') else 100,  # 图片宽度
+    'image_height': 224 if args.experiment_id in ('E4', 'E5') else 100,  # 图片高度
+    'eval_resize': 256 if args.experiment_id in ('E4', 'E5') else 100,
     'batch_size': 32,
     'channel': 3,  # 图片通道数
     'num_class':5,  # 分类类别
     'weight_decay': 0.01,
     'backbone_weight_decay': 0.0001,
+    'fine_tune_weight_decay': 0.0001,
     'lr':0.0001,  # 学习率
+    'fine_tune_lr': 0.00001,
     'min_lr': 0.000001,
     'dropout_ratio': 0.5,
     'epoch_size': 10,  # 训练次数
@@ -215,6 +219,7 @@ print('启用 Learning Rate Scheduler：', cfg.use_lr_scheduler)
 print('启用 ImageNet Pretrained Model：', cfg.use_pretrained_model)
 print('冻结 Backbone：', cfg.freeze_backbone)
 print('启用 Fine-tuning：', cfg.fine_tune)
+print('Fine-tune scope：', cfg.fine_tune_scope)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
@@ -369,8 +374,67 @@ def create_e4_network(config):
     return network, pretrained_source
 
 
-if cfg.use_pretrained_model:
+def get_layer4_trainable_parameters(network):
+    """Select layer4 Conv weights/biases and BatchNorm gamma/beta by Cell type."""
+    if not hasattr(network, 'layer4'):
+        raise ValueError("Expected MindCV ResNet18 to expose a layer4 Cell.")
+    selected = []
+    selected_ids = set()
+    for _, cell in network.layer4.cells_and_names():
+        if isinstance(cell, (nn.Conv2d, nn.Dense)):
+            attribute_names = ('weight', 'bias')
+        elif isinstance(cell, nn.BatchNorm2d):
+            attribute_names = ('gamma', 'beta')
+        else:
+            continue
+        for attribute_name in attribute_names:
+            param = getattr(cell, attribute_name, None)
+            if param is not None and id(param) not in selected_ids:
+                selected.append(param)
+                selected_ids.add(id(param))
+    if not selected:
+        raise ValueError("E5 requires trainable Conv/BatchNorm parameters in layer4.")
+    return selected
+
+
+def create_e5_network(config):
+    """Reuse E4 loading, then unfreeze only layer4 plus the classifier."""
+    if config.freeze_backbone or not config.fine_tune:
+        raise ValueError("E5 requires partial fine-tuning with freeze_backbone=False.")
+    if config.fine_tune_scope != 'layer4':
+        raise ValueError("E5 supports exactly one fine-tune scope: layer4.")
+
+    frozen_config = edict(dict(config))
+    frozen_config.freeze_backbone = True
+    frozen_config.fine_tune = False
+    network, pretrained_source = create_e4_network(frozen_config)
+
+    layer4_params = get_layer4_trainable_parameters(network)
+    for param in layer4_params:
+        param.requires_grad = True
+
+    classifier_params = list(network.classifier.get_parameters())
+    expected_trainable_ids = {
+        id(param) for param in layer4_params + classifier_params
+    }
+    actual_trainable_ids = {id(param) for param in network.trainable_params()}
+    if actual_trainable_ids != expected_trainable_ids:
+        raise ValueError(
+            "E5 trainable parameters must be exactly layer4 plus the classifier."
+        )
+
+    # create_e4_network already fixes every BatchNorm running statistic. Layer4
+    # gamma/beta are trainable above, while running mean/variance stay frozen.
+    for _, cell in network.cells_and_names():
+        if isinstance(cell, nn.BatchNorm2d) and cell.use_batch_statistics is not False:
+            raise ValueError("E5 requires frozen BatchNorm running statistics.")
+    return network, pretrained_source
+
+
+if cfg.experiment_id == 'E4':
     net, pretrained_source = create_e4_network(cfg)
+elif cfg.experiment_id == 'E5':
+    net, pretrained_source = create_e5_network(cfg)
 else:
     net = ResNet18(num_class=cfg.num_class)
     pretrained_source = "none (random initialization)"
@@ -396,8 +460,41 @@ def print_parameter_audit(network, config, source):
         print('Classifier head 参数：', [param.name for param in classifier_params])
 
 
-if cfg.use_pretrained_model:
+def print_e5_parameter_audit(network, config, source):
+    """Print and enforce the E5 layer4-plus-classifier trainable boundary."""
+    all_params = list(network.get_parameters())
+    trainable_params = list(network.trainable_params())
+    layer4_params = get_layer4_trainable_parameters(network)
+    classifier_params = list(network.classifier.get_parameters())
+    expected_ids = {id(param) for param in layer4_params + classifier_params}
+    actual_ids = {id(param) for param in trainable_params}
+    if actual_ids != expected_ids:
+        raise ValueError("E5 audit found parameters outside layer4/classifier.")
+
+    total_count = sum(int(np.prod(param.shape)) for param in all_params)
+    trainable_count = sum(int(np.prod(param.shape)) for param in trainable_params)
+    layer4_count = sum(int(np.prod(param.shape)) for param in layer4_params)
+    classifier_count = sum(int(np.prod(param.shape)) for param in classifier_params)
+    print('模型：', config.pretrained_model_name)
+    print('预训练权重来源：', source)
+    print('Fine-tune scope:', config.fine_tune_scope)
+    print('总参数量：', total_count)
+    print('可训练参数量：', trainable_count)
+    print('冻结参数量：', total_count - trainable_count)
+    print('[Layer4] 参数量：', layer4_count)
+    print('[Layer4] 参数：', [param.name for param in layer4_params])
+    print('[Layer4] lr：', config.fine_tune_lr)
+    print('[Layer4] weight decay：Conv/Dense weight=', config.fine_tune_weight_decay, ', BN/bias=0')
+    print('[Classifier] 参数量：', classifier_count)
+    print('[Classifier] 参数：', [param.name for param in classifier_params])
+    print('[Classifier] lr：', config.lr)
+    print('[Classifier] weight decay：weight=', config.weight_decay, ', bias=0')
+
+
+if cfg.experiment_id == 'E4':
     print_parameter_audit(net, cfg, pretrained_source)
+elif cfg.experiment_id == 'E5':
+    print_e5_parameter_audit(net, cfg, pretrained_source)
 
 #计算softmax交叉熵。
 net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
@@ -479,14 +576,79 @@ def create_e4_optimizer_param_groups(network, config):
     ]
 
 
-if cfg.use_pretrained_model:
+def create_e5_optimizer_param_groups(network, config):
+    """Use differential LR and explicit decay for layer4 and classifier."""
+    trainable_params = list(network.trainable_params())
+    layer4_params = get_layer4_trainable_parameters(network)
+    classifier_params = list(network.classifier.get_parameters())
+    layer4_ids = {id(param) for param in layer4_params}
+    classifier_ids = {id(param) for param in classifier_params}
+    if layer4_ids & classifier_ids:
+        raise ValueError("Layer4 and classifier parameter groups must be disjoint.")
+    if {id(param) for param in trainable_params} != layer4_ids | classifier_ids:
+        raise ValueError("E5 optimizer must receive only layer4 and classifier.")
+
+    layer4_decay_ids = set()
+    for _, cell in network.layer4.cells_and_names():
+        if isinstance(cell, (nn.Conv2d, nn.Dense)):
+            weight = getattr(cell, 'weight', None)
+            if weight is not None:
+                layer4_decay_ids.add(id(weight))
+    layer4_decay = [
+        param for param in layer4_params if id(param) in layer4_decay_ids
+    ]
+    layer4_no_decay = [
+        param for param in layer4_params if id(param) not in layer4_decay_ids
+    ]
+    classifier_weight = [network.classifier.weight]
+    classifier_no_decay = [
+        param for param in classifier_params
+        if id(param) != id(network.classifier.weight)
+    ]
+    groups = [
+        {
+            'params': layer4_decay,
+            'lr': config.fine_tune_lr,
+            'weight_decay': config.fine_tune_weight_decay,
+        },
+        {
+            'params': layer4_no_decay,
+            'lr': config.fine_tune_lr,
+            'weight_decay': 0.0,
+        },
+        {
+            'params': classifier_weight,
+            'lr': config.lr,
+            'weight_decay': config.weight_decay,
+        },
+        {
+            'params': classifier_no_decay,
+            'lr': config.lr,
+            'weight_decay': 0.0,
+        },
+    ]
+    if any(not group['params'] for group in groups):
+        raise ValueError("Every E5 optimizer parameter group must be non-empty.")
+    grouped_ids = [id(param) for group in groups for param in group['params']]
+    if len(grouped_ids) != len(set(grouped_ids)) or set(grouped_ids) != {
+        id(param) for param in trainable_params
+    }:
+        raise ValueError("E5 optimizer groups must cover trainable parameters once.")
+    return groups
+
+
+if cfg.experiment_id == 'E4':
     group_params = create_e4_optimizer_param_groups(net, cfg)
+elif cfg.experiment_id == 'E5':
+    group_params = create_e5_optimizer_param_groups(net, cfg)
 else:
     group_params = create_optimizer_param_groups(net, cfg)
 for group_index, group in enumerate(group_params):
+    group_lr = group.get('lr')
+    lr_summary = f", lr={group_lr}" if group_lr is not None else ""
     print(
         f"Optimizer group {group_index}: weight_decay={group['weight_decay']}, "
-        f"parameters={[param.name for param in group['params']]}"
+        f"parameters={[param.name for param in group['params']]}{lr_summary}"
     )
 
 
@@ -533,7 +695,13 @@ optimizer_learning_rate, configured_lr_values = create_learning_rate(
     cfg, steps_per_epoch
 )
 if configured_lr_values is None:
-    print(f"Learning rate: fixed at {cfg.lr}")
+    if cfg.experiment_id == 'E5':
+        print(
+            "Learning rate: fixed differential rates; "
+            f"layer4={cfg.fine_tune_lr}, classifier={cfg.lr}"
+        )
+    else:
+        print(f"Learning rate: fixed at {cfg.lr}")
 else:
     lr_curve_path = save_learning_rate_curve(configured_lr_values, cfg.experiment_id)
     print("Learning rate scheduler: per-step cosine decay")
