@@ -109,6 +109,6 @@ logs/E1_seed42.log
 | E3 | E2 | 仅 Cosine LR Scheduler（Adam 不变，逐 step 衰减） |
 | E4 | 独立迁移学习基线 | ImageNet pretrained ResNet18 + frozen Backbone + 新 5 类分类头；不继承 E1～E3 |
 | E5 | E4 | 仅 partial fine-tuning `layer4`；其余 Backbone 保持冻结，所有 BatchNorm running statistics 固定 |
-| E6 | E5 | 仅 Class Weight，且需先证明不平衡值得处理 |
+| E6 | E5 | 仅 Class-weighted Loss；权重只能由 train manifest 按 normalized inverse frequency 自动计算 |
 
-实验关系必须写成两条链：Baseline improvement track 为 E0→E1→E2→E3；Transfer learning track 为 E4→E5。E4 使用不同模型实现、ImageNet 初始化及其配套输入预处理，不能简单视为在 E3 上只增加一个训练参数，也不能把它与 E0～E3 的差异解释为单一变量贡献。E5 以 E4 为直接对照，唯一核心变化是只解冻 `layer4` 做 partial fine-tuning；不得同时引入额外增强或 scheduler。E4/E5 必须复用同一 split manifest、统一 evaluation、validation best-checkpoint 选择和最终 test 流程。
+实验关系必须写成两条链：Baseline improvement track 为 E0→E1→E2→E3；Transfer learning track 为 E4→E5→E6，其中 E6 是 conditional/candidate imbalance experiment。E4 使用不同模型实现、ImageNet 初始化及其配套输入预处理，不能简单视为在 E3 上只增加一个训练参数，也不能把它与 E0～E3 的差异解释为单一变量贡献。E5 以 E4 为直接对照，唯一核心变化是只解冻 `layer4` 做 partial fine-tuning；不得同时引入额外增强或 scheduler。E6 必须完整继承 E5，唯一主要变化是 class-weighted loss；权重只能由 `splits/train.txt` 按 `w_c = N / (K * n_c)` 自动统计，不得参考 validation/test 数量或表现。E4/E5/E6 必须复用同一 split manifest、统一 evaluation、Validation Accuracy best-checkpoint 选择和最终 test 流程。E6 是否纳入核心改进链，必须等待正式诊断和实验，不得预设有效。

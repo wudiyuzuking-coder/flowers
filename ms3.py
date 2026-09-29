@@ -27,8 +27,11 @@ from mindspore.train.serialization import load_checkpoint, save_checkpoint
 
 from evaluation import evaluate_dataset, save_test_evaluation, save_training_curves
 from evaluation import save_confusion_matrix
+from class_weight import load_train_class_weights
 from split_manifest import CLASS_INDEXING, ManifestImageSource
+from split_manifest import CLASS_NAMES
 from split_manifest import load_and_validate_split_manifests
+from weighted_loss import WeightedSoftmaxCrossEntropy
 
 # 设置MindSpore的执行模式和设备
 context.set_context(device_target="GPU", mode=mindspore.GRAPH_MODE)
@@ -43,24 +46,25 @@ ds.config.set_seed(seed)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the E0-E5 flower experiments.")
+    parser = argparse.ArgumentParser(description="Run the E0-E6 flower experiments.")
     parser.add_argument(
         "--experiment-id",
-        choices=("E0", "E1", "E2", "E3", "E4", "E5"),
+        choices=("E0", "E1", "E2", "E3", "E4", "E5", "E6"),
         default="E0",
         help=(
             "E0 is the baseline; E1 adds conservative augmentation; "
             "E2 keeps E1 and extends weight decay to backbone weights; "
             "E3 keeps E2 and adds cosine learning-rate decay; "
             "E4 is an independent frozen ImageNet-pretrained ResNet18 baseline; "
-            "E5 keeps E4 and partially fine-tunes layer4."
+            "E5 keeps E4 and partially fine-tunes layer4; "
+            "E6 keeps E5 and adds train-manifest class weighting."
         ),
     )
     parser.add_argument(
         "--pretrained-checkpoint",
         default="",
         help=(
-            "Optional local official MindCV ResNet18 ImageNet checkpoint for E4/E5. "
+            "Optional local official MindCV ResNet18 ImageNet checkpoint for E4/E5/E6. "
             "When omitted, MindCV downloads its registered pretrained checkpoint."
         ),
     )
@@ -69,26 +73,27 @@ def parse_args():
 
 args = parse_args()
 
-if args.pretrained_checkpoint and args.experiment_id not in ('E4', 'E5'):
-    raise ValueError("--pretrained-checkpoint is only valid for experiment E4/E5.")
+if args.pretrained_checkpoint and args.experiment_id not in ('E4', 'E5', 'E6'):
+    raise ValueError("--pretrained-checkpoint is only valid for experiment E4/E5/E6.")
 
 cfg = edict({
     'experiment_id': args.experiment_id,
     'use_extra_augmentation': args.experiment_id in ('E1', 'E2', 'E3'),
     'use_backbone_weight_decay': args.experiment_id in ('E2', 'E3'),
     'use_lr_scheduler': args.experiment_id == 'E3',
-    'use_pretrained_model': args.experiment_id in ('E4', 'E5'),
+    'use_pretrained_model': args.experiment_id in ('E4', 'E5', 'E6'),
     'freeze_backbone': args.experiment_id == 'E4',
-    'fine_tune': args.experiment_id == 'E5',
-    'fine_tune_scope': 'layer4' if args.experiment_id == 'E5' else None,
+    'fine_tune': args.experiment_id in ('E5', 'E6'),
+    'fine_tune_scope': 'layer4' if args.experiment_id in ('E5', 'E6') else None,
+    'use_class_weight': args.experiment_id == 'E6',
     'pretrained_checkpoint': args.pretrained_checkpoint,
     'pretrained_model_name': 'resnet18',
     'data_path': './flower_photos',
     'splits_path': './splits',
     'data_size':3670,
-    'image_width': 224 if args.experiment_id in ('E4', 'E5') else 100,  # 图片宽度
-    'image_height': 224 if args.experiment_id in ('E4', 'E5') else 100,  # 图片高度
-    'eval_resize': 256 if args.experiment_id in ('E4', 'E5') else 100,
+    'image_width': 224 if args.experiment_id in ('E4', 'E5', 'E6') else 100,  # 图片宽度
+    'image_height': 224 if args.experiment_id in ('E4', 'E5', 'E6') else 100,  # 图片高度
+    'eval_resize': 256 if args.experiment_id in ('E4', 'E5', 'E6') else 100,
     'batch_size': 32,
     'channel': 3,  # 图片通道数
     'num_class':5,  # 分类类别
@@ -212,6 +217,17 @@ def create_datasets(config):
 
 
 de_train, de_train_eval, de_val, de_test, split_info = create_datasets(cfg)
+train_class_counts = None
+train_class_weights = None
+if cfg.use_class_weight:
+    train_manifest_path = os.path.join(cfg.splits_path, 'train.txt')
+    train_class_counts, train_class_weights = load_train_class_weights(
+        train_manifest_path, CLASS_NAMES
+    )
+    if sum(train_class_counts.values()) != split_info['split_counts']['train']:
+        raise ValueError("E6 class counts do not match the validated train split size.")
+    if train_class_counts != split_info['split_class_counts']['train']:
+        raise ValueError("E6 class counts do not match the validated train manifest.")
 print('实验编号：', cfg.experiment_id)
 print('启用额外数据增强：', cfg.use_extra_augmentation)
 print('启用 Backbone Weight Decay：', cfg.use_backbone_weight_decay)
@@ -220,11 +236,22 @@ print('启用 ImageNet Pretrained Model：', cfg.use_pretrained_model)
 print('冻结 Backbone：', cfg.freeze_backbone)
 print('启用 Fine-tuning：', cfg.fine_tune)
 print('Fine-tune scope：', cfg.fine_tune_scope)
+print('启用 Class-weighted Loss：', cfg.use_class_weight)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
 print('固定 split 样本数：', split_info['split_counts'])
 print('固定 split manifest SHA-256：', split_info['manifest_sha256'])
+if cfg.use_class_weight:
+    print('Class weight 来源：', os.path.join(cfg.splits_path, 'train.txt'))
+    print('Train class counts：', train_class_counts)
+    print(
+        'Train class weights：',
+        {
+            class_name: float(train_class_weights[class_index])
+            for class_index, class_name in enumerate(CLASS_NAMES)
+        },
+    )
 
 
 # 定义CNN图像识别网络
@@ -433,7 +460,7 @@ def create_e5_network(config):
 
 if cfg.experiment_id == 'E4':
     net, pretrained_source = create_e4_network(cfg)
-elif cfg.experiment_id == 'E5':
+elif cfg.experiment_id in ('E5', 'E6'):
     net, pretrained_source = create_e5_network(cfg)
 else:
     net = ResNet18(num_class=cfg.num_class)
@@ -493,11 +520,15 @@ def print_e5_parameter_audit(network, config, source):
 
 if cfg.experiment_id == 'E4':
     print_parameter_audit(net, cfg, pretrained_source)
-elif cfg.experiment_id == 'E5':
+elif cfg.experiment_id in ('E5', 'E6'):
     print_e5_parameter_audit(net, cfg, pretrained_source)
 
-#计算softmax交叉熵。
-net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
+
+# E0-E5 retain their original unweighted mean CE; only E6 changes the loss.
+if cfg.use_class_weight:
+    net_loss = WeightedSoftmaxCrossEntropy(train_class_weights)
+else:
+    net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
 # opt
 def create_optimizer_param_groups(network, config):
     """Build explicit decay groups without relying on parameter-name patterns."""
@@ -639,7 +670,7 @@ def create_e5_optimizer_param_groups(network, config):
 
 if cfg.experiment_id == 'E4':
     group_params = create_e4_optimizer_param_groups(net, cfg)
-elif cfg.experiment_id == 'E5':
+elif cfg.experiment_id in ('E5', 'E6'):
     group_params = create_e5_optimizer_param_groups(net, cfg)
 else:
     group_params = create_optimizer_param_groups(net, cfg)
@@ -695,7 +726,7 @@ optimizer_learning_rate, configured_lr_values = create_learning_rate(
     cfg, steps_per_epoch
 )
 if configured_lr_values is None:
-    if cfg.experiment_id == 'E5':
+    if cfg.experiment_id in ('E5', 'E6'):
         print(
             "Learning rate: fixed differential rates; "
             f"layer4={cfg.fine_tune_lr}, classifier={cfg.lr}"
