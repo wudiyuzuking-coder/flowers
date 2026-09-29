@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import mindspore
 #导入mindspore框架数据集
 import mindspore.dataset as ds
+import mindspore.dataset.vision as vision
 #vision.c_transforms模块是处理图像增强的高性能模块，用于数据增强图像数据改进训练模型。
 import mindspore.dataset.vision.c_transforms as CV
 #c_transforms模块提供常用操作，包括OneHotOp和TypeCast
@@ -42,15 +43,24 @@ ds.config.set_seed(seed)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the E0-E3 flower experiments.")
+    parser = argparse.ArgumentParser(description="Run the E0-E4 flower experiments.")
     parser.add_argument(
         "--experiment-id",
-        choices=("E0", "E1", "E2", "E3"),
+        choices=("E0", "E1", "E2", "E3", "E4"),
         default="E0",
         help=(
             "E0 is the baseline; E1 adds conservative augmentation; "
             "E2 keeps E1 and extends weight decay to backbone weights; "
-            "E3 keeps E2 and adds cosine learning-rate decay."
+            "E3 keeps E2 and adds cosine learning-rate decay; "
+            "E4 is an independent frozen ImageNet-pretrained ResNet18 baseline."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-checkpoint",
+        default="",
+        help=(
+            "Optional local official MindCV ResNet18 ImageNet checkpoint for E4. "
+            "When omitted, MindCV downloads its registered pretrained checkpoint."
         ),
     )
     return parser.parse_args()
@@ -58,16 +68,25 @@ def parse_args():
 
 args = parse_args()
 
+if args.pretrained_checkpoint and args.experiment_id != 'E4':
+    raise ValueError("--pretrained-checkpoint is only valid for experiment E4.")
+
 cfg = edict({
     'experiment_id': args.experiment_id,
     'use_extra_augmentation': args.experiment_id in ('E1', 'E2', 'E3'),
     'use_backbone_weight_decay': args.experiment_id in ('E2', 'E3'),
     'use_lr_scheduler': args.experiment_id == 'E3',
+    'use_pretrained_model': args.experiment_id == 'E4',
+    'freeze_backbone': args.experiment_id == 'E4',
+    'fine_tune': False,
+    'pretrained_checkpoint': args.pretrained_checkpoint,
+    'pretrained_model_name': 'resnet18',
     'data_path': './flower_photos',
     'splits_path': './splits',
     'data_size':3670,
-    'image_width': 100,  # 图片宽度
-    'image_height': 100,  # 图片高度
+    'image_width': 224 if args.experiment_id == 'E4' else 100,  # 图片宽度
+    'image_height': 224 if args.experiment_id == 'E4' else 100,  # 图片高度
+    'eval_resize': 256 if args.experiment_id == 'E4' else 100,
     'batch_size': 32,
     'channel': 3,  # 图片通道数
     'num_class':5,  # 分类类别
@@ -91,32 +110,56 @@ def create_datasets(config):
         config.data_path, config.splits_path
     )
 
-    train_operations = [
-        CV.RandomCropDecodeResize(
-            [config.image_width, config.image_height],
-            scale=(0.08, 1.0),
-            ratio=(0.75, 1.333),
-        )
-    ]
-    if config.use_extra_augmentation:
-        train_operations.extend([
-            CV.RandomHorizontalFlip(prob=0.5),
-            CV.RandomRotation(degrees=10),
-            CV.RandomColorAdjust(
-                brightness=(0.9, 1.1),
-                contrast=(0.9, 1.1),
-                saturation=(0.9, 1.1),
-                hue=(-0.05, 0.05),
+    if config.use_pretrained_model:
+        # MindCV 0.3.0 ImageNet transform constants are expressed on [0, 255]
+        # pixels. E4 intentionally omits E1 flip/rotation/color augmentation.
+        imagenet_mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
+        imagenet_std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+        train_operations = [
+            vision.RandomCropDecodeResize(
+                [config.image_width, config.image_height],
+                scale=(0.08, 1.0),
+                ratio=(0.75, 1.333),
             ),
-        ])
-    train_operations.extend([CV.HWC2CHW(), C.TypeCast(mstype.float32)])
+            vision.Normalize(mean=imagenet_mean, std=imagenet_std),
+            vision.HWC2CHW(),
+            C.TypeCast(mstype.float32),
+        ]
+        eval_operations = [
+            vision.Decode(),
+            vision.Resize(config.eval_resize),
+            vision.CenterCrop([config.image_width, config.image_height]),
+            vision.Normalize(mean=imagenet_mean, std=imagenet_std),
+            vision.HWC2CHW(),
+            C.TypeCast(mstype.float32),
+        ]
+    else:
+        train_operations = [
+            CV.RandomCropDecodeResize(
+                [config.image_width, config.image_height],
+                scale=(0.08, 1.0),
+                ratio=(0.75, 1.333),
+            )
+        ]
+        if config.use_extra_augmentation:
+            train_operations.extend([
+                CV.RandomHorizontalFlip(prob=0.5),
+                CV.RandomRotation(degrees=10),
+                CV.RandomColorAdjust(
+                    brightness=(0.9, 1.1),
+                    contrast=(0.9, 1.1),
+                    saturation=(0.9, 1.1),
+                    hue=(-0.05, 0.05),
+                ),
+            ])
+        train_operations.extend([CV.HWC2CHW(), C.TypeCast(mstype.float32)])
 
-    eval_operations = [
-        CV.Decode(),
-        CV.Resize([config.image_width, config.image_height]),
-        CV.HWC2CHW(),
-        C.TypeCast(mstype.float32),
-    ]
+        eval_operations = [
+            CV.Decode(),
+            CV.Resize([config.image_width, config.image_height]),
+            CV.HWC2CHW(),
+            C.TypeCast(mstype.float32),
+        ]
 
     train_source = ManifestImageSource(
         config.data_path, split_entries['train'], CLASS_INDEXING
@@ -169,6 +212,9 @@ print('实验编号：', cfg.experiment_id)
 print('启用额外数据增强：', cfg.use_extra_augmentation)
 print('启用 Backbone Weight Decay：', cfg.use_backbone_weight_decay)
 print('启用 Learning Rate Scheduler：', cfg.use_lr_scheduler)
+print('启用 ImageNet Pretrained Model：', cfg.use_pretrained_model)
+print('冻结 Backbone：', cfg.freeze_backbone)
+print('启用 Fine-tuning：', cfg.fine_tune)
 print('训练批次数：', de_train.get_dataset_size())
 print('验证批次数：', de_val.get_dataset_size())
 print('测试批次数：', de_test.get_dataset_size())
@@ -248,7 +294,110 @@ class ResNet18(nn.Cell):
         x = self.fc(x)
         return x
  
-net = ResNet18(num_class=cfg.num_class)
+def create_e4_network(config):
+    """Load the official ImageNet model, replace its head, and freeze backbone."""
+    if not config.freeze_backbone or config.fine_tune:
+        raise ValueError("E4 requires a frozen backbone and does not implement fine-tuning.")
+    try:
+        import mindcv
+    except ImportError as error:
+        raise RuntimeError(
+            "E4 requires MindCV. Install the verified dependency from requirements.txt."
+        ) from error
+    if getattr(mindcv, '__version__', None) != '0.3.0':
+        raise RuntimeError(
+            "E4 is verified against MindCV 0.3.0; install requirements.txt "
+            f"instead of running with MindCV {getattr(mindcv, '__version__', 'unknown')}."
+        )
+
+    if config.pretrained_checkpoint:
+        checkpoint_path = os.path.abspath(config.pretrained_checkpoint)
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f"E4 pretrained checkpoint does not exist: {checkpoint_path}"
+            )
+        network = mindcv.create_model(
+            config.pretrained_model_name,
+            pretrained=False,
+            num_classes=1000,
+            in_channels=config.channel,
+        )
+        checkpoint_params = load_checkpoint(checkpoint_path)
+        param_not_load, checkpoint_not_load = mindspore.load_param_into_net(
+            network, checkpoint_params, strict_load=True
+        )
+        if param_not_load or checkpoint_not_load:
+            raise ValueError(
+                "Offline pretrained checkpoint is not an exact MindCV ResNet18 "
+                f"ImageNet match: param_not_load={param_not_load}, "
+                f"checkpoint_not_load={checkpoint_not_load}"
+            )
+        pretrained_source = f"MindCV 0.3.0 local checkpoint: {checkpoint_path}"
+    else:
+        network = mindcv.create_model(
+            config.pretrained_model_name,
+            pretrained=True,
+            num_classes=1000,
+            in_channels=config.channel,
+        )
+        pretrained_source = (
+            "MindCV 0.3.0 registered ResNet18 ImageNet checkpoint "
+            "(network download/cache)"
+        )
+
+    if not hasattr(network, 'classifier') or not hasattr(network, 'num_features'):
+        raise ValueError("Expected MindCV ResNet18 classifier and num_features attributes.")
+
+    network.classifier = nn.Dense(
+        network.num_features,
+        config.num_class,
+        weight_init=TruncatedNormal(0.02),
+    )
+    classifier_params = list(network.classifier.get_parameters())
+    classifier_param_ids = {id(param) for param in classifier_params}
+    for param in network.get_parameters():
+        param.requires_grad = id(param) in classifier_param_ids
+
+    # A frozen feature extractor must not update BatchNorm running statistics.
+    for _, cell in network.cells_and_names():
+        if isinstance(cell, nn.BatchNorm2d):
+            cell.use_batch_statistics = False
+
+    trainable_ids = {id(param) for param in network.trainable_params()}
+    if trainable_ids != classifier_param_ids:
+        raise ValueError("E4 trainable parameters must be exactly the new classifier.")
+    return network, pretrained_source
+
+
+if cfg.use_pretrained_model:
+    net, pretrained_source = create_e4_network(cfg)
+else:
+    net = ResNet18(num_class=cfg.num_class)
+    pretrained_source = "none (random initialization)"
+
+
+def print_parameter_audit(network, config, source):
+    """Print parameter counts and fail if E4 exposes non-classifier parameters."""
+    all_params = list(network.get_parameters())
+    trainable_params = list(network.trainable_params())
+    total_count = sum(int(np.prod(param.shape)) for param in all_params)
+    trainable_count = sum(int(np.prod(param.shape)) for param in trainable_params)
+    print('模型：', config.pretrained_model_name if config.use_pretrained_model else 'custom_resnet18')
+    print('预训练权重来源：', source)
+    print('总参数量：', total_count)
+    print('可训练参数量：', trainable_count)
+    print('冻结参数量：', total_count - trainable_count)
+    print('可训练参数：', [param.name for param in trainable_params])
+    if config.use_pretrained_model:
+        classifier_params = list(network.classifier.get_parameters())
+        classifier_ids = {id(param) for param in classifier_params}
+        if {id(param) for param in trainable_params} != classifier_ids:
+            raise ValueError("E4 parameter audit found a trainable backbone parameter.")
+        print('Classifier head 参数：', [param.name for param in classifier_params])
+
+
+if cfg.use_pretrained_model:
+    print_parameter_audit(net, cfg, pretrained_source)
 
 #计算softmax交叉熵。
 net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
@@ -308,7 +457,32 @@ def create_optimizer_param_groups(network, config):
     ]
 
 
-group_params = create_optimizer_param_groups(net, cfg)
+def create_e4_optimizer_param_groups(network, config):
+    """Apply existing head decay convention to the new E4 classifier only."""
+    trainable_params = list(network.trainable_params())
+    classifier_params = list(network.classifier.get_parameters())
+    classifier_weight_id = id(network.classifier.weight)
+    classifier_ids = {id(param) for param in classifier_params}
+    if {id(param) for param in trainable_params} != classifier_ids:
+        raise ValueError("E4 optimizer must receive only classifier parameters.")
+    weight_params = [
+        param for param in trainable_params if id(param) == classifier_weight_id
+    ]
+    no_decay_params = [
+        param for param in trainable_params if id(param) != classifier_weight_id
+    ]
+    if len(weight_params) != 1 or not no_decay_params:
+        raise ValueError("Expected one classifier weight and at least one bias parameter.")
+    return [
+        {'params': weight_params, 'weight_decay': config.weight_decay},
+        {'params': no_decay_params, 'weight_decay': 0.0},
+    ]
+
+
+if cfg.use_pretrained_model:
+    group_params = create_e4_optimizer_param_groups(net, cfg)
+else:
+    group_params = create_optimizer_param_groups(net, cfg)
 for group_index, group in enumerate(group_params):
     print(
         f"Optimizer group {group_index}: weight_decay={group['weight_decay']}, "

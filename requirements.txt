@@ -1,5 +1,5 @@
 easydict
 matplotlib
 mindspore
+mindcv==0.3.0
 numpy
-

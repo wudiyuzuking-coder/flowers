@@ -107,8 +107,8 @@ logs/E1_seed42.log
 | E1 | E0 | 仅 Data Augmentation |
 | E2 | E1 | 仅扩大 Weight Decay 作用范围（保留 FC weight=0.01，新增 Backbone weight decay） |
 | E3 | E2 | 仅 Cosine LR Scheduler（Adam 不变，逐 step 衰减） |
-| E4 | E0 或预先声明的对照 | 模型替换为 Pretrained Model；必须明确对照关系 |
+| E4 | 独立迁移学习基线 | ImageNet pretrained ResNet18 + frozen Backbone + 新 5 类分类头；不继承 E1～E3 |
 | E5 | E4 | 解冻策略/Fine-tuning |
 | E6 | E5 | 仅 Class Weight，且需先证明不平衡值得处理 |
 
-E4 跨模型结构，不能简单视为在 E3 上只增加一个训练参数；报告中应把 Baseline 攭进链（E0～E3）与迁移学习链（E4～E6）的比较关系写清楚。
+实验关系必须写成两条链：Baseline improvement track 为 E0→E1→E2→E3；Transfer learning track 为 E4→E5。E4 使用不同模型实现、ImageNet 初始化及其配套输入预处理，不能简单视为在 E3 上只增加一个训练参数，也不能把它与 E0～E3 的差异解释为单一变量贡献。E4 仍必须复用同一 split manifest、统一 evaluation、validation best-checkpoint 选择和最终 test 流程。
